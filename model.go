@@ -6,12 +6,16 @@ import (
 	"os"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/ai"
 
 	"github.com/davecgh/go-spew/spew"
 )
+
+const gap = "\n\n"
 
 const (
 	typing uint = iota
@@ -27,6 +31,8 @@ type model struct {
 	state        uint
 	dump         io.Writer
 	textarea     textarea.Model
+	viewport     viewport.Model
+	err          error
 	conversation []ai.AIRunParamsBodyTextGenerationMessage
 }
 
@@ -40,14 +46,28 @@ func NewModel() model {
 		}
 	}
 
-	ti := textarea.New()
-	ti.Placeholder = "Enter search term"
-	ti.Focus()
-	ti.ShowLineNumbers = false
+	ta := textarea.New()
+	ta.Placeholder = "Enter search term"
+	ta.Focus()
+	ta.Prompt = "┃ "
+	ta.CharLimit = 280
+
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ta.ShowLineNumbers = false
+
+	ta.ShowLineNumbers = false
+
+	vp := viewport.New(30, 5)
+	vp.SetContent(`Welcome to Agent. Ask anything..`)
+
+	ta.KeyMap.InsertNewline.SetEnabled(false)
 
 	return model{
-		textarea: ti,
-		dump:     dump,
+		textarea:     ta,
+		dump:         dump,
+		viewport:     vp,
+		conversation: []ai.AIRunParamsBodyTextGenerationMessage{},
+		err:          nil,
 	}
 }
 
@@ -56,17 +76,35 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
+	var (
+		tiCmd tea.Cmd
+		vpCmd tea.Cmd
+	)
+
+	m.textarea, tiCmd = m.textarea.Update(msg)
+	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	if m.dump != nil {
 		spew.Fdump(m.dump, msg)
 	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.viewport.Width = msg.Width
 		m.textarea.SetWidth(msg.Width)
+		m.viewport.Height = msg.Height - m.textarea.Height() - lipgloss.Height(gap)
+		m.textarea.SetWidth(msg.Width)
+		m.textarea.SetHeight(3)
+
+		if len(m.conversation) > 0 {
+			m.updateViewportContent()
+		}
+		m.viewport.GotoBottom()
 
 	case ai.AIRunParamsBodyTextGenerationMessage:
 		m.conversation = append(m.conversation, msg)
+
+		m.updateViewportContent()
+		m.viewport.GotoBottom()
 		m.state = typing
 		return m, nil
 
@@ -92,14 +130,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Role:    cloudflare.F("user"),
 				Content: cloudflare.F(usermsg),
 			})
-			m.state = receiving
+			m.updateViewportContent()
+			m.viewport.GotoBottom()
 			m.textarea.Reset()
+			m.state = receiving
 			return m, handleLLMResponse(usermsg, m.conversation)
 		}
 	}
 
-	m.textarea, cmd = m.textarea.Update(msg)
-	return m, cmd
+	return m, tea.Batch(tiCmd, vpCmd)
 }
 
 func handleLLMResponse(msg string, c []ai.AIRunParamsBodyTextGenerationMessage) tea.Cmd {
@@ -127,3 +166,40 @@ func handleLLMResponse(msg string, c []ai.AIRunParamsBodyTextGenerationMessage) 
 		return nil
 	}
 }
+
+func (m *model) updateViewportContent() {
+	var fullContent string
+	boxWidth := max(m.viewport.Width-4, 0)
+	for _, msg := range m.conversation {
+		if msg.Role.String() == "user" {
+			fullContent += lipgloss.NewStyle().
+				MarginLeft(1).
+				MarginRight(1).
+				Padding(1).
+				Border(lipgloss.RoundedBorder()).
+				Width(boxWidth).
+				Render(UserRoleStyle.Render(msg.Role.String())+": "+msg.Content.String()) + "\n"
+		} else {
+			fullContent += lipgloss.NewStyle().
+				MarginLeft(1).
+				MarginRight(1).
+				Padding(1).
+				Border(lipgloss.RoundedBorder()).
+				Width(boxWidth).
+				Render(AssistantRoleStyle.Render(msg.Role.String())+": "+msg.Content.String()) + "\n"
+		}
+	}
+	m.viewport.SetContent(fullContent)
+}
+
+var (
+	UserRoleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Underline(true).
+			Foreground(lipgloss.Color("9"))
+
+	AssistantRoleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Underline(true).
+				Foreground(lipgloss.Color("8"))
+)

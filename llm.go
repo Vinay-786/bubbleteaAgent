@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 
@@ -46,9 +45,7 @@ type Agent struct {
 }
 
 func (a *Agent) Run(ctx context.Context, conversation []ai.AIRunParamsBodyTextGenerationMessage) (*ai.AIRunResponseUnion, error) {
-	fmt.Println("Chat with Agent (use 'ctrl-c' to quit)")
 	for {
-		fmt.Print("\u001b[94mYou\u001b[0m: ")
 		userInput := a.userMessage
 
 		userMessage := ai.AIRunParamsBodyTextGenerationMessage{
@@ -76,7 +73,7 @@ func (a *Agent) runInference(ctx context.Context, data []ai.AIRunParamsBodyTextG
 
 	ACC_ID := os.Getenv("CLOUDFLARE_ACC_ID")
 	message, err := a.client.AI.Run(
-		ctx, "@cf/meta/llama-4-scout-17b-16e-instruct", ai.AIRunParams{
+		ctx, "@cf/meta/llama-3.1-8b-instruct-fast", ai.AIRunParams{
 			AccountID: cloudflare.F(ACC_ID),
 			Body: ai.AIRunParamsBodyTextGeneration{
 				Messages: cloudflare.F(data),
