@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,8 +20,20 @@ import (
 const gap = "\n\n"
 
 const (
-	typing uint = iota
-	receiving
+	chatting uint = iota
+	selectllm
+)
+
+var (
+	UserRoleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Underline(true).
+			Foreground(lipgloss.Color("9"))
+
+	AssistantRoleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Underline(true).
+				Foreground(lipgloss.Color("8"))
 )
 
 type Conversation struct {
@@ -34,7 +48,20 @@ type model struct {
 	viewport     viewport.Model
 	err          error
 	conversation []ai.AIRunParamsBodyTextGenerationMessage
+	currentModel string
+	modelList    list.Model
+	store        *sqliteStore
 }
+
+type ModelNames struct {
+	sno   int
+	name  string
+	alias string
+}
+
+func (m ModelNames) Title() string       { return m.alias }
+func (m ModelNames) Description() string { return m.name }
+func (m ModelNames) FilterValue() string { return m.alias }
 
 func NewModel() model {
 	var dump *os.File
@@ -62,31 +89,60 @@ func NewModel() model {
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
+	defaultList := list.New([]list.Item{
+		ModelNames{sno: 1, name: "@cf/meta/llama-3.1-8b-instruct-fast", alias: "Llama 3.1"},
+		ModelNames{sno: 2, name: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", alias: "Llama 3.3"},
+		ModelNames{sno: 3, name: "@cf/google/gemma-3-12b-it", alias: "Google Gemma"},
+		ModelNames{sno: 4, name: "@cf/qwen/qwq-32b", alias: "Qwen"},
+		ModelNames{sno: 5, name: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", alias: "DeepSeek"},
+		ModelNames{sno: 6, name: "@cf/mistralai/mistral-small-3.1-24b-instruct", alias: "Mistral"},
+	}, list.NewDefaultDelegate(), 0, 0)
+
+	defaultList.Title = "Available Models"
+	defaultList.SetShowTitle(true)
+	defaultList.SetFilteringEnabled(true)
+	defaultList.SetShowHelp(true)
+
+	store := &sqliteStore{}
+	if err := store.Init(); err != nil {
+		log.Fatal(err)
+	}
+	store.createTables()
+
 	return model{
 		textarea:     ta,
 		dump:         dump,
 		viewport:     vp,
 		conversation: []ai.AIRunParamsBodyTextGenerationMessage{},
+		currentModel: "@cf/meta/llama-3.1-8b-instruct-fast", //default model
 		err:          nil,
+		modelList:    defaultList,
+		store:        store,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(
+		textarea.Blink,
+		tea.EnterAltScreen,
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
+		liCmd tea.Cmd
 	)
 
+	// Always update these components
 	m.textarea, tiCmd = m.textarea.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	if m.dump != nil {
 		spew.Fdump(m.dump, msg)
 	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.viewport.Width = msg.Width
@@ -94,6 +150,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Height = msg.Height - m.textarea.Height() - lipgloss.Height(gap)
 		m.textarea.SetWidth(msg.Width)
 		m.textarea.SetHeight(3)
+		m.modelList.SetWidth(msg.Width / 2)
+		m.modelList.SetHeight(msg.Height)
 
 		if len(m.conversation) > 0 {
 			m.updateViewportContent()
@@ -102,48 +160,63 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ai.AIRunParamsBodyTextGenerationMessage:
 		m.conversation = append(m.conversation, msg)
-
 		m.updateViewportContent()
 		m.viewport.GotoBottom()
-		m.state = typing
 		return m, nil
 
 	case tea.KeyMsg:
 		switch m.state {
-		case typing:
+		case chatting:
 			switch msg.Type {
 			case tea.KeyCtrlC:
 				return m, tea.Quit
+			case tea.KeyCtrlS:
+				m.store.SaveConversation(m.conversation)
+			case tea.KeyCtrlE:
+				m.textarea.Blur()
+				m.state = selectllm
+				return m, nil
+			case tea.KeyEnter:
+				usermsg := m.textarea.Value()
+				m.conversation = append(m.conversation, ai.AIRunParamsBodyTextGenerationMessage{
+					Role:    cloudflare.F("user"),
+					Content: cloudflare.F(usermsg),
+				})
+				m.updateViewportContent()
+				m.viewport.GotoBottom()
+				m.textarea.Reset()
+				return m, handleLLMResponse(usermsg, m.conversation, m.currentModel)
 			}
-		case receiving:
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "ctrl+t":
-				m.state = typing
+		case selectllm:
+			m.modelList, liCmd = m.modelList.Update(msg)
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.state = chatting
+				m.textarea.Focus()
+				return m, nil
+			case tea.KeyEnter:
+				if item, ok := m.modelList.SelectedItem().(ModelNames); ok {
+					m.currentModel = item.name
+					m.state = chatting
+					m.textarea.Focus()
+				}
+				return m, nil
 			}
+			return m, liCmd
 		}
-		switch msg.String() {
-		case "enter":
-			usermsg := m.textarea.Value()
-			m.conversation = append(m.conversation, ai.AIRunParamsBodyTextGenerationMessage{
-				Role:    cloudflare.F("user"),
-				Content: cloudflare.F(usermsg),
-			})
-			m.updateViewportContent()
-			m.viewport.GotoBottom()
-			m.textarea.Reset()
-			m.state = receiving
-			return m, handleLLMResponse(usermsg, m.conversation)
-		}
+	}
+
+	if m.state == selectllm {
+		m.modelList, liCmd = m.modelList.Update(msg)
+		return m, tea.Batch(tiCmd, vpCmd, liCmd)
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
-func handleLLMResponse(msg string, c []ai.AIRunParamsBodyTextGenerationMessage) tea.Cmd {
+func handleLLMResponse(msg string, c []ai.AIRunParamsBodyTextGenerationMessage, model string) tea.Cmd {
 	return func() tea.Msg {
-		res, err := callAgent(msg, c)
+		res, err := callAgent(msg, c, model)
 		if err != nil {
 			return err
 		}
@@ -160,7 +233,6 @@ func handleLLMResponse(msg string, c []ai.AIRunParamsBodyTextGenerationMessage) 
 				Role:    cloudflare.F("assistant"),
 				Content: cloudflare.F(obj.Response),
 			}
-			// fmt.Printf("\u001b[93mLlama\u001b[0m: %s\n", obj.Response)
 		}
 
 		return nil
@@ -191,15 +263,3 @@ func (m *model) updateViewportContent() {
 	}
 	m.viewport.SetContent(fullContent)
 }
-
-var (
-	UserRoleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Underline(true).
-			Foreground(lipgloss.Color("9"))
-
-	AssistantRoleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Underline(true).
-				Foreground(lipgloss.Color("8"))
-)

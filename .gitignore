@@ -1,2 +1,5 @@
 .env
 messages.log
+data.db
+cfagent
+cfagent.exe

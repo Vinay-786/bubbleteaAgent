@@ -11,7 +11,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func callAgent(msg string, m []ai.AIRunParamsBodyTextGenerationMessage) (*ai.AIRunResponseUnion, error) {
+func callAgent(msg string, m []ai.AIRunParamsBodyTextGenerationMessage, model string) (*ai.AIRunResponseUnion, error) {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
@@ -24,7 +24,7 @@ func callAgent(msg string, m []ai.AIRunParamsBodyTextGenerationMessage) (*ai.AIR
 	)
 
 	agent := NewAgent(client, msg)
-	res, err := agent.Run(context.TODO(), m)
+	res, err := agent.Run(context.TODO(), m, model)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ type Agent struct {
 	userMessage string
 }
 
-func (a *Agent) Run(ctx context.Context, conversation []ai.AIRunParamsBodyTextGenerationMessage) (*ai.AIRunResponseUnion, error) {
+func (a *Agent) Run(ctx context.Context, conversation []ai.AIRunParamsBodyTextGenerationMessage, model string) (*ai.AIRunResponseUnion, error) {
 	for {
 		userInput := a.userMessage
 
@@ -55,7 +55,7 @@ func (a *Agent) Run(ctx context.Context, conversation []ai.AIRunParamsBodyTextGe
 
 		conversation = append(conversation, userMessage)
 
-		message, err := a.runInference(ctx, conversation)
+		message, err := a.runInference(ctx, conversation, model)
 		if err != nil {
 			return nil, err
 		}
@@ -65,7 +65,7 @@ func (a *Agent) Run(ctx context.Context, conversation []ai.AIRunParamsBodyTextGe
 	}
 }
 
-func (a *Agent) runInference(ctx context.Context, data []ai.AIRunParamsBodyTextGenerationMessage) (*ai.AIRunResponseUnion, error) {
+func (a *Agent) runInference(ctx context.Context, data []ai.AIRunParamsBodyTextGenerationMessage, model string) (*ai.AIRunResponseUnion, error) {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
@@ -73,7 +73,7 @@ func (a *Agent) runInference(ctx context.Context, data []ai.AIRunParamsBodyTextG
 
 	ACC_ID := os.Getenv("CLOUDFLARE_ACC_ID")
 	message, err := a.client.AI.Run(
-		ctx, "@cf/meta/llama-3.1-8b-instruct-fast", ai.AIRunParams{
+		ctx, model, ai.AIRunParams{
 			AccountID: cloudflare.F(ACC_ID),
 			Body: ai.AIRunParamsBodyTextGeneration{
 				Messages: cloudflare.F(data),
